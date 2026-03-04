@@ -1,0 +1,240 @@
+<!DOCTYPE html>
+    <head>
+        <meta charset="utf-8">
+        <link rel="stylesheet" type="text/css" href="style.css"/>
+        <title>Bpm Measurement</title>
+        <meta name="viewport" content="width=devise-width, initial-scale=1.0">
+        <meta name="description" content="web上で演奏のBPMを測定できるwebアプリです。">
+        <meta name="robots" content="noindex, nofoloow">
+        <meta name="theme-color" content="#111827">
+    </head>
+
+    <body>
+        <h1>BPM Estimator</h1>
+        <h3>web上で録音し、BPMを測定できるWebアプリです</h3>
+        <div class="result-container">
+            <div class="result-item result-main">
+                <div class="label">BPM</div>
+                <div id="bpm" class="value">-</div>
+            </div>
+
+        </div>
+        
+        <div class="button-container">
+            <button id="start">Start</button>
+            <button id="stop">Stop</button>
+        </div>
+        
+        <div id="waveform"></div>
+        <div class="controls-container">
+            <button id="playBtn">▶/⏸</button>
+            <button id="estimateBtn">測定</button>
+        </div>
+        
+        <div class="operation-instructions">
+            <h3="instruction-title">操作説明</h3>
+            <ol class="instruction-list">
+                <li>「Start」ボタンを押し、ブラウザのマイクの使用を許可する。</li>
+                <li>音源や演奏を15秒以上流し、「Stop」ボタンを押す。</li>
+                <li>BPMを測定する範囲を選択し、「測定」ボタンを押す。</li>
+            </ol>
+        </div>
+
+        <script type="module">
+            import WaveSurfer from 'https://cdn.jsdelivr.net/npm/wavesurfer.js@7/dist/wavesurfer.esm.js'
+            import RegionsPlugin from 'https://cdn.jsdelivr.net/npm/wavesurfer.js@7/dist/plugins/regions.esm.js'
+            let audioCtx, mediaStream, source, processor;
+            let chunks = [];
+            let sampleRate = 48000;
+            let total = 0;
+            let merged = null;
+            let wavBlob = null;
+            let wsRegions;
+
+            const wavesurfer = WaveSurfer.create({
+                container: '#waveform',
+                waveColor: '#5e8de6',
+                progressColor: '#4b6cab',
+            })
+            wsRegions = wavesurfer.registerPlugin(RegionsPlugin.create({}))
+            wavesurfer.on('ready', () => {
+                wsRegions.clearRegions();
+
+                wsRegions.addRegion({
+                    start: 0,
+                    end: 15,
+                    minLength: 15,
+                    maxLength: 30
+                });
+            });
+
+
+
+
+            document.getElementById("playBtn").onclick = async () => {
+                wavesurfer.playPause()
+            }
+
+            async function resampleAudio(float32Array, originalRate, targetRate) {
+                const targetLength = Math.round(float32Array.length * targetRate / originalRate);
+                const offlineCtx = new OfflineAudioContext(1, targetLength, targetRate);
+                const buffer = offlineCtx.createBuffer(1, float32Array.length, originalRate);
+                buffer.copyFromChannel(float32Array, 0);
+
+                const source = offlineCtx.createBufferSource();
+                source.buffer = buffer;
+                source.connect(offlineCtx.destination);
+                source.start(0);
+
+                const renderBuffer = await offlineCtx.startRendering();
+                return renderBuffer.getChannelData(0);
+            
+                
+            }
+
+
+            // WAV生成関数 float32をint16に変換
+            function encodeWav(float32Array, sampleRate) {
+                const buffer = new ArrayBuffer(44 + float32Array.length * 2);
+                const view = new DataView(buffer);
+
+                // i=0から始めて、str.lengthになるまでiを1ずつ増やす、数字に対応する文字列の文字コードを変換する
+                function writeString(offset, str){
+                    for (let i = 0; i < str.length; i++) view.setUint8(offset + i, str.charCodeAt(i));
+                }
+
+            writeString(0, "RIFF"); //RIFF:WAVファイルの形式
+            view.setUint32(4, 36 + float32Array.length * 2, true); //ファイルのサイズ
+            writeString(8, "WAVE"); //WAVファイルのこと
+            writeString(12, "fmt "); //fmtチャンク開始　fmtチャンク；データを説明するもの
+            view.setUint32(16, 16, true); //fmtチャンクサイス
+            view.setUint16(20, 1, true); //音声フォーマット
+            view.setUint16(22, 1, true); //チャンネル数　モノラル
+            view.setUint32(24, sampleRate, true); //サンプルレート(１秒間に何個のデータがあるか)
+            view.setUint32(28, sampleRate * 2, true); //バイトレート（１秒間当たりのバイト数）
+            view.setUint16(32, 2, true); //ブロックアライン＝１サンプル当たりのバイト数　データの区切り
+            view.setUint16(34, 16, true); //1チャンネル当たりのバイト数
+            writeString(36, "data"); //dataチャンク開始　data本体
+            view.setUint32(40, float32Array.length * 2, true); //dataチャンクサイズ
+
+            let offset = 44;
+            // 1サンプルずつ処理しながら書き込み位置を2バイトずつ進める（１サンプル２バイト）
+            for (let i = 0; i < float32Array.length; i++, offset += 2){
+                let s = Math.max(-1, Math.min(1, float32Array[i])); //音声データが-1~1を超えないようにする
+                view.setInt16(offset, s < 0 ? s * 0x8000 : s * 0x7fff, true); //-1~1を16bit整数にして書き込む（負：0x8000, 正：0x7fff)
+                }
+            return new Blob([buffer], {type: "audio/wav"}); //生成したバイナリをBlob(WAVファイル相当)として返す。
+            }
+
+
+
+            // startボタンが押されたときに実行する非同期関数を設定
+            document.getElementById("start").onclick = async () => {
+                console.log("[start] clicked");
+                chunks = [];
+                total = 0;
+                merged = null;
+                wavBlob = null;
+                wavesurfer.empty()
+                mediaStream = await navigator.mediaDevices.getUserMedia({audio: true}); //マイク使用許可を求め、音声ストリームを取得
+                audioCtx = new (window.AudioContext || window.webkitAudioContext)();  //AudioContext;ブラウザ内で音声を処理するためのワークスペース
+                sampleRate = audioCtx.sampleRate; //サンプルレートを取得し保存
+
+                source = audioCtx.createMediaStreamSource(mediaStream); //マイクのMediaStreamをAudioContextのノードとして取り込む。
+                processor = audioCtx.createScriptProcessor(4096, 1, 1); //ScriptProcessorNode: jsで音声処理をできるようにするためのノードを作成
+                processor.onaudioprocess = (e) => {
+                    const input = e.inputBuffer.getChannelData(0); //AudioContextが音声バッファを処理したらJSに渡す
+                    chunks.push(new Float32Array(input)); //chunksに音を貯蓄していく
+                };
+
+                source.connect(processor); //マイク入力をprocessorへ接続
+                processor.connect(audioCtx.destination); //processorをスピーカーに接続
+
+                document.getElementById("start").disabled = true; //録音中に録音開始を押せないようにする
+                document.getElementById("stop").disabled = false; //録音後にstopを押せるようにする
+
+            };
+
+            //stopボタンが押されたときに実行
+            document.getElementById("stop").onclick = async () =>{
+                console.log("[stop] clicked")
+                document.getElementById("stop").disabled = true;
+
+                // 停止処理
+                if (processor) processor.disconnect();
+                if (source) source.disconnect();
+                if (mediaStream) mediaStream.getTracks().forEach(t => t.stop());
+                if (audioCtx) await audioCtx.close();
+
+                // 音声の結合
+                total = chunks.reduce((acc, a) => acc + a.length, 0); //チャンク内のデータを順次足していく数えるだけ
+                merged = new Float32Array(total); //チャンク内の合計の配列を確保
+                let pos = 0; //書き込み開始位置
+                for (const c of chunks) {merged.set(c, pos); pos += c.length;} //書き込み
+
+                // 録音データ確認用
+                console.log("[stop] chunks.length=", chunks.length);
+                console.log("[stop] total samples=", total);
+
+                // wav化
+                wavBlob = encodeWav(merged, sampleRate); //録音したFloat32をwav(16PCM)Blobに変換
+                console.log("[stop] wacBlob.size=", wavBlob.size, "type=", wavBlob.type);
+
+                wavesurfer.loadBlob(wavBlob)
+                
+                
+
+            };
+
+            document.getElementById("estimateBtn").onclick = async () =>{
+                if (wavBlob === null) return; 
+                const regions = wsRegions.getRegions();
+                
+                if (!merged || regions.length === 0){
+                    alert("先に録音して、範囲を選択してください。");
+                    return;
+                }
+
+                document.getElementById("bpm").textContent = "測定中";
+                ;
+                document.getElementById("score").textContent = "-";
+
+                
+
+                const region = regions[0];
+                const startTime = region.start;
+                const endTime = region.end;
+                console.log(`選択範囲: ${startTime.toFixed(2)}秒 〜 ${endTime.toFixed(2)}秒`);
+                const startIndex = Math.floor(startTime * sampleRate);
+                const endIndex = Math.floor(endTime * sampleRate);
+
+                const sliceData = merged.slice(startIndex, endIndex);
+                const targetRate = 22050;
+                const resampleData = await resampleAudio(sliceData, sampleRate, targetRate);
+                const sliceWAVBlob = encodeWav(resampleData, targetRate);
+
+                // 送信
+                const fd = new FormData(); //ファイル送信用のフォームデータ
+                fd.append("file", sliceWAVBlob, "clipped_mic.wav"); //フィールド名file、ファイル名mic.wavとして送る
+
+                const res = await fetch("https://bpm-measurement-front.onrender.com/analyze", {
+                    method: "POST",
+                    body: fd
+                });
+                const json = await res.json();
+                // json.bpmがあれば表示
+                document.getElementById("bpm").textContent = (json.bpm_corrected ?? "-");
+                
+                document.getElementById("start").disabled = false; //次の録音ができるように録音開始を有効化
+
+            }
+
+        </script> 
+
+
+
+    </body>
+   
+
+
+</html>
